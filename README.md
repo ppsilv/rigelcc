@@ -1,0 +1,2 @@
+# rigelcc
+The rigelOS compiler
