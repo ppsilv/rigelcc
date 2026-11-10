@@ -28,13 +28,60 @@ static HashMap defs;        // symbols defined by this file
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
 
+// Tiny peephole done at output time:
+//  - code that directly follows an unconditional `bra` (and has no label
+//    before it) is unreachable and is dropped;
+//  - a `bra L` immediately followed by the label `L:` is dropped.
+static char pending[512];
+static bool has_pending;
+static bool dead;
+
+static void flush_pending(void) {
+  if (has_pending)
+    fprintf(output_file, "%s\n", pending);
+  has_pending = false;
+}
+
+static bool is_directive(char *s) {
+  static char *dirs[] = {"  xdef", "  xref", "  section", "  even", "  dc.", "  ds."};
+  for (int i = 0; i < 6; i++)
+    if (!strncmp(s, dirs[i], strlen(dirs[i])))
+      return true;
+  return false;
+}
+
 __attribute__((format(printf, 1, 2)))
 static void println(char *fmt, ...) {
+  char line[512];
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(output_file, fmt, ap);
+  vsnprintf(line, sizeof(line), fmt, ap);
   va_end(ap);
-  fprintf(output_file, "\n");
+
+  bool is_label = line[0] != ' ';
+  bool is_dir = !is_label && is_directive(line);
+
+  if (is_label || is_dir) {
+    dead = false;
+    // `bra L` directly followed by `L:`
+    if (is_label && has_pending && !strncmp(pending, "  bra ", 6)) {
+      int n = strlen(pending + 6);
+      if (!strncmp(line, pending + 6, n) && line[n] == ':' && line[n + 1] == 0)
+        has_pending = false;
+    }
+  } else if (dead) {
+    return;
+  }
+
+  flush_pending();
+
+  if (!strncmp(line, "  bra ", 6)) {
+    strcpy(pending, line);
+    has_pending = true;
+    dead = true;
+    return;
+  }
+  fprintf(output_file, "%s\n", line);
 }
 
 static int count(void) {
@@ -973,6 +1020,7 @@ static void assign_lvar_offsets(Obj *prog) {
 }
 
 static void emit_bytes(unsigned char *data, int from, int to) {
+  flush_pending();
   int n = 0;
   for (int i = from; i < to; i++) {
     if (n == 0)
@@ -1093,6 +1141,7 @@ void codegen(Obj *prog, FILE *out) {
   assign_lvar_offsets(prog);
   emit_data(prog);
   emit_text(prog);
+  flush_pending();
   fclose(output_file);
 
   output_file = out;
